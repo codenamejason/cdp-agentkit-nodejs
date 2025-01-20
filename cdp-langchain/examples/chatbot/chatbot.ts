@@ -1,14 +1,44 @@
 import { CdpAgentkit } from "@coinbase/cdp-agentkit-core";
-import { CdpToolkit } from "@coinbase/cdp-langchain";
+import { CdpTool, CdpToolkit } from "@coinbase/cdp-langchain";
+import { hashMessage } from "@coinbase/coinbase-sdk";
+import { Wallet } from "@coinbase/coinbase-sdk";
 import { HumanMessage } from "@langchain/core/messages";
 import { MemorySaver } from "@langchain/langgraph";
 import { createReactAgent } from "@langchain/langgraph/prebuilt";
-import { ChatOpenAI } from "@langchain/openai";
+import { ChatOpenAI, DallEAPIWrapper } from "@langchain/openai";
 import * as dotenv from "dotenv";
 import * as fs from "fs";
 import * as readline from "readline";
+import { z } from "zod";
 
 dotenv.config();
+
+// Define the prompt for the sign message action
+const SIGN_MESSAGE_PROMPT = `This tool will sign arbitrary messages using EIP-191 Signed Message Standard hashing.`;
+
+// Define the input schema using Zod
+const SignMessageInput = z
+  .object({
+    message: z.string().describe("The message to sign. e.g. `hello world`"),
+  })
+  .strip()
+  .describe("Instructions for signing a blockchain message");
+
+/**
+ * Signs a message using EIP-191 message hash from the wallet
+ *
+ * @param wallet - The wallet to sign the message from
+ * @param args - The input arguments for the action
+ * @returns The message and corresponding signature
+ */
+async function signMessage(
+  wallet: Wallet,
+  args: z.infer<typeof SignMessageInput>,
+): Promise<string> {
+  // Using the correct method from Wallet interface
+  const payloadSignature = await wallet.createPayloadSignature(hashMessage(args.message));
+  return `The payload signature ${payloadSignature}`;
+}
 
 /**
  * Validates that required environment variables are set
@@ -20,7 +50,12 @@ function validateEnvironment(): void {
   const missingVars: string[] = [];
 
   // Check required variables
-  const requiredVars = ["OPENAI_API_KEY", "CDP_API_KEY_NAME", "CDP_API_KEY_PRIVATE_KEY"];
+  const requiredVars = [
+    // "OPENAI_API_KEY",
+    "CDP_API_KEY_NAME",
+    "CDP_API_KEY_PRIVATE_KEY",
+    "XAI_API_KEY",
+  ];
   requiredVars.forEach(varName => {
     if (!process.env[varName]) {
       missingVars.push(varName);
@@ -84,6 +119,25 @@ async function initializeAgent() {
     // Initialize CDP AgentKit Toolkit and get tools
     const cdpToolkit = new CdpToolkit(agentkit);
     const tools = cdpToolkit.getTools();
+
+    const dallETool = new DallEAPIWrapper({
+      n: 1,
+      model: "dall-e-3",
+      apiKey: process.env.OPENAI_API_KEY,
+    });
+    tools.push(dallETool);
+
+    // Add the sign message tool
+    const signMessageTool = new CdpTool(
+      {
+        name: "sign_message",
+        description: SIGN_MESSAGE_PROMPT,
+        argsSchema: SignMessageInput,
+        func: signMessage,
+      },
+      agentkit,
+    );
+    tools.push(signMessageTool);
 
     // Store buffered conversation history in memory
     const memory = new MemorySaver();
